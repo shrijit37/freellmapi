@@ -83,7 +83,7 @@ const PLATFORMS = [
   'halx',
   'aisense',
   'freeai',
-  'google', 'groq', 'cerebras', 'sail', 'electronhub', 'experiential', 'router9', 'septor', 'clod', 'speechify', 'blaze', 'lucidity', 'airforce', 'dreamprompting', 'waterfall', 'logfare', 'bai', 'radeon', 'nvidia', 'mistral',
+  'google', 'antigravity', 'groq', 'cerebras', 'sail', 'electronhub', 'experiential', 'router9', 'septor', 'clod', 'speechify', 'blaze', 'lucidity', 'airforce', 'dreamprompting', 'waterfall', 'logfare', 'bai', 'radeon', 'nvidia', 'mistral',
   'openrouter', 'cohere', 'tavily', 'exa', 'firecrawl', 'linkup', 'parallel', 'keenable', 'cloudflare', 'zhipu', 'ollama',
   'kilo', 'pollinations', 'llm7', 'huggingface', 'opencode', 'ovh', 'agnes', 'reka', 'siliconflow',
   'routeway', 'bazaarlink', 'ainative', 'aion', 'anyapi', 'requesty', 'navy', 'nara', 'sealion', 'orcarouter', 'unorouter', 'xkiro', 'modelscope',
@@ -136,6 +136,10 @@ const addKeySchema = z.object({
   key: z.string().optional(),
   label: z.string().optional(),
   proxyUrl: proxyUrlSchema.optional(),
+  // Egress relay routing: 'inherit' (default pool) | 'pool' (assigned pool) |
+  // 'direct' (bypass pools). relayPoolId only meaningful with 'pool'.
+  relayMode: z.enum(['inherit', 'pool', 'direct']).optional(),
+  relayPoolId: z.number().int().positive().nullable().optional(),
 });
 
 // `modelScope` (#657): the model_id list this key may serve — relay stations
@@ -147,6 +151,9 @@ const updateKeySchema = z.object({
   modelScope: z.array(z.string().trim().min(1).max(200)).max(100).nullable().optional(),
   // #590: '' clears the per-key proxy; absent leaves it unchanged.
   proxyUrl: proxyUrlSchema.optional(),
+  // Egress relay routing — same semantics as addKeySchema.
+  relayMode: z.enum(['inherit', 'pool', 'direct']).optional(),
+  relayPoolId: z.number().int().positive().nullable().optional(),
   // Monthly budget caps (#1158): 0 clears the cap (unlimited).
   monthlyRequestCap: z.number().int().min(0).max(1_000_000_000).optional(),
   monthlyTokenCap: z.number().int().min(0).max(1_000_000_000_000).optional(),
@@ -155,8 +162,8 @@ const updateKeySchema = z.object({
   groupLabel: z.string().trim().max(80).optional(),
   // An absent credential leaves the encrypted key untouched.
   key: z.string().trim().min(1).optional(),
-}).refine(data => data.enabled !== undefined || data.label !== undefined || data.modelScope !== undefined || data.proxyUrl !== undefined || data.key !== undefined || data.monthlyRequestCap !== undefined || data.monthlyTokenCap !== undefined || data.groupLabel !== undefined, {
-  message: 'At least one of enabled, label, modelScope, proxyUrl, key, monthlyRequestCap, monthlyTokenCap or groupLabel must be provided',
+}).refine(data => data.enabled !== undefined || data.label !== undefined || data.modelScope !== undefined || data.proxyUrl !== undefined || data.relayMode !== undefined || data.relayPoolId !== undefined || data.key !== undefined || data.monthlyRequestCap !== undefined || data.monthlyTokenCap !== undefined || data.groupLabel !== undefined, {
+  message: 'At least one of enabled, label, modelScope, proxyUrl, relayMode, relayPoolId, key, monthlyRequestCap, monthlyTokenCap or groupLabel must be provided',
 });
 
 const importKeySchema = z.object({
@@ -522,6 +529,9 @@ keysRouter.get('/', (_req: Request, res: Response) => {
       // override. Enough for the dashboard to show that a key routes through
       // its own exit, without handing the proxy credentials back out.
       maskedProxyUrl: maskProxyUrl(decryptProxyUrl(row)),
+      // Egress relay routing — ids aren't secret, surfaced for the dashboard.
+      relayMode: row.relay_mode ?? 'inherit',
+      relayPoolId: row.relay_pool_id ?? null,
       models: row.platform === 'custom' ? (modelsByEndpoint.get(endpointOf(Number(row.id))) ?? []) : undefined,
       modelDiscovery: canDiscover(row.platform),
       cooldowns: cooldowns.map(c => ({
@@ -839,9 +849,10 @@ keysRouter.post('/', (req: Request, res: Response) => {
   // `user:pass@` credentials. Absent/'' stores NULLs = no override.
   const proxy = encryptProxyUrl(proxyUrl);
   const result = db.prepare(`
-    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, proxy_encrypted, proxy_iv, proxy_auth_tag)
-    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?, ?)
-  `).run(platform, label ?? '', encrypted, iv, authTag, proxy.encrypted, proxy.iv, proxy.authTag);
+    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, proxy_encrypted, proxy_iv, proxy_auth_tag, relay_mode, relay_pool_id)
+    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?, ?, ?, ?)
+  `).run(platform, label ?? '', encrypted, iv, authTag, proxy.encrypted, proxy.iv, proxy.authTag,
+    parsed.data.relayMode ?? 'inherit', parsed.data.relayPoolId ?? null);
 
   // #1348: fetch the provider's models in the background when the catalog
   // carries none for it. No-op for every other platform.
@@ -1908,7 +1919,7 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const { enabled, label, modelScope, proxyUrl, key, monthlyRequestCap, monthlyTokenCap, groupLabel } = parsed.data;
+  const { enabled, label, modelScope, proxyUrl, relayMode, relayPoolId, key, monthlyRequestCap, monthlyTokenCap, groupLabel } = parsed.data;
   const updates: string[] = [];
   const values: (string | number | null)[] = [];
   let changedKey: string | undefined;
@@ -1963,6 +1974,16 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
     const proxy = encryptProxyUrl(proxyUrl);
     updates.push('proxy_encrypted = ?', 'proxy_iv = ?', 'proxy_auth_tag = ?');
     values.push(proxy.encrypted, proxy.iv, proxy.authTag);
+  }
+  // Egress relay routing: relay_mode 'inherit'|'pool'|'direct'; relay_pool_id
+  // NULL clears the assignment (pool mode then falls back to the default pool).
+  if (relayMode !== undefined) {
+    updates.push('relay_mode = ?');
+    values.push(relayMode);
+  }
+  if (relayPoolId !== undefined) {
+    updates.push('relay_pool_id = ?');
+    values.push(relayPoolId);
   }
   // Monthly budget caps (#1158): 0 = unlimited.
   if (monthlyRequestCap !== undefined) {
@@ -2019,6 +2040,8 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
   if (proxyUrl !== undefined) response.maskedProxyUrl = maskProxyUrl(proxyUrl);
   if (key !== undefined) response.maskedKey = maskKey(key);
   if (modelScope !== undefined) response.modelScope = scopeIds.length > 0 ? scopeIds : null;
+  if (relayMode !== undefined) response.relayMode = relayMode;
+  if (relayPoolId !== undefined) response.relayPoolId = relayPoolId;
   if (groupLabel !== undefined) response.groupLabel = normalizeGroupLabel(groupLabel);
   res.json(response);
 });

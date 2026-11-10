@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { getSetting } from '../db/index.js';
 import { decrypt, encrypt } from './crypto.js';
 import { assertProviderUrlAllowed, isLoopbackOrPrivateHostname } from './url-guard.js';
+import { relayFetch, resolvePoolForKey, RelayExhaustedError } from './relay-pool.js';
 import type { ProxyMode } from '@freellmapi/shared/types.js';
 
 // #590 (per-key proxy): the SAME provider may be reached through different
@@ -12,11 +13,32 @@ import type { ProxyMode } from '@freellmapi/shared/types.js';
 // singletons, so the per-key override cannot live on the provider instance —
 // it rides request-scoped AsyncLocalStorage instead, set by the dispatcher
 // around a provider call and read here in proxyFetch.
-const perKeyProxyStore = new AsyncLocalStorage<string>();
+//
+// The store now carries a full RequestEgress (proxy override + relay-pool
+// routing) rather than a bare proxy URL, so dispatchFetch can resolve relay
+// pools between the per-key proxy and the global proxy. withKeyProxy stays
+// as the proxy-only wrapper every existing call site uses.
+export interface RequestEgress {
+  /** Per-key proxy override (#590); '' / undefined = global proxy path. */
+  proxyUrl?: string;
+  /** api_keys.relay_pool_id — explicit pool for relay_mode='pool'. */
+  relayPoolId?: number | null;
+  /** api_keys.relay_mode — 'inherit' | 'pool' | 'direct'. */
+  relayMode?: 'inherit' | 'pool' | 'direct';
+  /** Sticky-pool pin scope (usually the api key id). */
+  stickyScope?: string | number;
+}
+
+const egressStore = new AsyncLocalStorage<RequestEgress>();
 
 /** Run `fn` with a per-key proxy override in effect; empty URL = global proxy. */
 export function withKeyProxy<T>(proxyUrl: string | undefined, fn: () => T): T {
-  return perKeyProxyStore.run(proxyUrl ?? '', fn);
+  return egressStore.run({ proxyUrl: proxyUrl ?? '' }, fn);
+}
+
+/** Run `fn` with a full request egress context (proxy + relay pool). */
+export function withRequestEgress<T>(egress: RequestEgress, fn: () => T): T {
+  return egressStore.run(egress, fn);
 }
 
 
@@ -627,7 +649,7 @@ export function describeFetchFailure(err: unknown, url: string, platform?: strin
   if (!code) return;
   let host = '';
   try { host = new URL(url).hostname; } catch { /* leave it out */ }
-  const proxied = _proxyEnabled && !!(perKeyProxyStore.getStore() || _proxyUrl) && !shouldBypassProxy(url, platform);
+  const proxied = _proxyEnabled && !!((egressStore.getStore()?.proxyUrl) || _proxyUrl) && !shouldBypassProxy(url, platform);
   const parts = [code, host, proxied ? 'via proxy' : ''].filter(Boolean);
   err.message = `fetch failed (${parts.join(' ')})`;
 }
@@ -894,7 +916,7 @@ function proxyRequiredError(platform: string | undefined, reason: string): Error
  * Lazy import also keeps undici out of the ordinary startup path. */
 export async function openProviderWebSocket(url: string, platform: string, options: { protocols?: string[]; headers?: Record<string, string> } = {}): Promise<import('undici').WebSocket> {
   if (!_initialized) applyProxyUrl('');
-  const perKey = perKeyProxyStore.getStore() ?? '';
+  const perKey = egressStore.getStore()?.proxyUrl ?? '';
   let dispatcher: unknown;
   if (shouldBypassProxy(url, platform) || (!perKey && !_proxyUrl)) {
     if (requiresOutboundProxy(platform)) throw proxyRequiredError(platform, 'proxy routing disabled or bypassed');
@@ -916,10 +938,11 @@ async function dispatchFetch(
   requestType: ProxyRequestType,
   timeoutMs: number | undefined,
 ): Promise<Response> {
-  // #590: a per-key proxy override (set via withKeyProxy around the provider
-  // call) takes precedence over the global proxy for THIS request. Empty
-  // string (the store default) means "fall back to global".
-  const perKeyUrl = perKeyProxyStore.getStore() ?? '';
+  // #590: a per-key proxy override (set via withKeyProxy/withRequestEgress
+  // around the provider call) takes precedence over the global proxy for THIS
+  // request. Empty string (the store default) means "fall back to global".
+  const egress = egressStore.getStore();
+  const perKeyUrl = egress?.proxyUrl ?? '';
   const proxyRequired = requiresOutboundProxy(platform);
   if (perKeyUrl) {
     // Every bypass still applies, unchanged: the global on/off switch, the
@@ -940,6 +963,32 @@ async function dispatchFetch(
       }
     }
     // Non-required platforms keep their historical global/direct fallback.
+  }
+
+  // Egress relay pool: resolved from the request-scoped egress context set by
+  // withRequestEgress (api_keys.relay_mode / relay_pool_id on the routed key).
+  // Sits between the per-key proxy and the global proxy in precedence: a key
+  // with its own proxy URL exits through that proxy; otherwise a configured
+  // pool forwards through its relay workers; 'direct' mode and pool
+  // exhaustion-with-fallback=direct both fall through to the global path.
+  if (egress && egress.relayMode !== 'direct' && !shouldBypassProxy(url, platform)) {
+    // Pool lookup is best-effort: an uninitialized DB (unit tests, early
+    // boot) simply means "no pools configured" and falls through to the
+    // global path rather than failing every provider call.
+    let pool;
+    try {
+      pool = resolvePoolForKey(egress.relayMode, egress.relayPoolId);
+    } catch {
+      pool = undefined;
+    }
+    if (pool) {
+      const result = await relayFetch(pool, url, init, { stickyScope: egress.stickyScope ?? egress.relayPoolId ?? undefined });
+      if (result.ok) return result.response;
+      if (pool.fallback === 'fail') {
+        throw new RelayExhaustedError(`relay pool "${pool.name}" exhausted: ${result.message}`);
+      }
+      // fallback='direct' → continue to the global proxy/direct path below.
+    }
   }
 
   // Bypass check: disabled globally, this platform is exempt, the upstream

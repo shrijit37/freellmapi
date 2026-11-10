@@ -149,6 +149,9 @@ interface KeyRow {
   proxy_encrypted: string | null;
   proxy_iv: string | null;
   proxy_auth_tag: string | null;
+  // Egress relay routing: 'inherit'|'pool'|'direct' + optional pool id.
+  relay_mode?: string | null;
+  relay_pool_id?: number | null;
 }
 
 // Chain row joined with the model fields the bandit needs to score it.
@@ -220,6 +223,11 @@ export interface RouteResult {
    * path simply mean "no override".
    */
   proxyUrl?: string;
+  /** Egress relay routing for this key (#relay-pool): 'inherit'|'pool'|'direct'
+   *  plus the assigned pool id. Carried on the route so dispatchFetch can
+   *  resolve the pool without a second api_keys read. */
+  relayMode?: 'inherit' | 'pool' | 'direct';
+  relayPoolId?: number | null;
   // Daily limits for this model, so a 429 handler can tell a genuine daily
   // exhaustion (escalate the cooldown) from a transient per-minute spike.
   rpdLimit: number | null;
@@ -1730,6 +1738,8 @@ function selectKeyForModel(entry: ChainRow, estimatedTokens: number, skipKeys?: 
       keyLabel: key.label || null,
       // Decrypted once here, at the point the row is already in hand (#590).
       proxyUrl,
+      relayMode: key.relay_mode === 'pool' || key.relay_mode === 'direct' ? key.relay_mode : 'inherit',
+      relayPoolId: key.relay_pool_id ?? null,
       platform: entry.platform,
       displayName: entry.display_name,
       contextWindow: entry.context_window,

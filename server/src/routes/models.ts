@@ -20,7 +20,7 @@ import { clearCustomModelTombstone, recordCustomModelTombstone } from '../servic
 import { customModelSeed } from '../services/custom-model-seed.js';
 import { routePinnedModel, failureAttributionFor } from '../services/router.js';
 import { logRequest } from '../lib/request-log.js';
-import { withKeyProxy } from '../lib/proxy.js';
+import { withRequestEgress } from '../lib/proxy.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
 import { recordRequest, recordTokens } from '../services/ratelimit.js';
 import { recordMonthlyUsage } from '../services/key-budget.js';
@@ -420,7 +420,7 @@ modelsRouter.post('/:id/test', async (req: Request, res: Response) => {
   }
   const startTime = Date.now();
   try {
-    const response = await withKeyProxy(route.proxyUrl, () => route.provider.chatCompletion(
+    const response = await withRequestEgress({ proxyUrl: route.proxyUrl, relayMode: route.relayMode, relayPoolId: route.relayPoolId, stickyScope: route.keyId }, () => route.provider.chatCompletion(
       route.apiKey, [{ role: 'user', content: 'ping' }], route.modelId,
       { max_tokens: outputLimit, timeoutMs: 15_000 },
     ));

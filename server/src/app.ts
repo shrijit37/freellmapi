@@ -35,6 +35,8 @@ import { ollamaRouter } from './routes/ollama.js';
 import { urlTokenRouter } from './routes/url-tokens.js';
 import { updateRouter } from './routes/update.js';
 import { moderationRouter } from './routes/moderation.js';
+import { oauthRouter, oauthPublicRouter } from './routes/oauth.js';
+import { relaysRouter } from './routes/relays.js';
 import { requireAuth } from './middleware/requireAuth.js';
 import { createHostGuard } from './middleware/allowed-hosts.js';
 import { createProxyRateLimiter, createAdminRateLimiter } from './middleware/rateLimit.js';
@@ -282,6 +284,12 @@ export function createApp(config?: Config) {
   app.use('/api/cache', requireAuth, cacheRouter);
   app.use('/api/compression', requireAuth, compressionRouter);
   app.use('/api/update', requireAuth, updateRouter);
+  // OAuth authcode callback must be reachable WITHOUT a dashboard session —
+  // the provider redirects the user's browser here. Mounted before the
+  // requireAuth-gated router; it only owns GET /:provider/callback.
+  app.use('/api/oauth', oauthPublicRouter);
+  app.use('/api/oauth', requireAuth, oauthRouter);
+  app.use('/api/relays', requireAuth, relaysRouter);
 
   // Health check — no auth required.
   app.get('/api/ping', (_req, res) => {

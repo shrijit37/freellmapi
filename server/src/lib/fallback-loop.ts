@@ -62,7 +62,7 @@ import { getDb, getSetting } from '../db/index.js';
 import { newBreaker, recordBreakerFailure } from './guardrails.js';
 import { getRequestTrace, newRequestTrace, runWithRequestTrace, type AttemptOutcome, type AttemptTraceRecord, type RequestTrace } from './attempt-trace.js';
 import { logRequest, persistRequestAttempts } from './request-log.js';
-import { withKeyProxy } from './proxy.js';
+import { withRequestEgress } from './proxy.js';
 import { getEndpointTimeBudgetMs } from './ttfb-budget.js';
 import { learnOutputCapFromError, learnedOutputCap } from './output-cap.js';
 
@@ -1567,12 +1567,17 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
     }
     let outcome: DispatchOutcome;
     try {
-      // #590 (per-key proxy): if THIS key carries its own proxy URL, route the
-      // attempt through it (withKeyProxy → proxyFetch reads the ALS store);
-      // otherwise the global proxy / direct path applies as before. The URL
-      // arrives already decrypted on the route (services/router.ts), so an
-      // attempt costs nothing extra — no query, no decrypt.
-      outcome = await withKeyProxy(route.proxyUrl, () => hooks.dispatch(route, attempt, { disarmHedge }));
+      // #590 (per-key proxy) + relay pools: if THIS key carries its own proxy
+      // URL or relay routing, route the attempt through it (withRequestEgress
+      // → proxyFetch reads the ALS store); otherwise the global path applies.
+      // The fields arrive already decrypted/read on the route
+      // (services/router.ts), so an attempt costs nothing extra — no query.
+      outcome = await withRequestEgress({
+        proxyUrl: route.proxyUrl,
+        relayMode: route.relayMode,
+        relayPoolId: route.relayPoolId,
+        stickyScope: route.keyId,
+      }, () => hooks.dispatch(route, attempt, { disarmHedge }));
     } catch (err: any) {
       // Client-caused abort: the composed fetch signal fired because OUR
       // client hung up mid-attempt (see newClientAbortError). Not a

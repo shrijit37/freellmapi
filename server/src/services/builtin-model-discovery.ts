@@ -5,7 +5,7 @@ import { getProvider } from '../providers/index.js';
 import { OpenAICompatProvider } from '../providers/openai-compat.js';
 import { decrypt } from '../lib/crypto.js';
 import { decryptProxyUrl } from '../lib/key-proxy.js';
-import { withKeyProxy } from '../lib/proxy.js';
+import { withRequestEgress } from '../lib/proxy.js';
 import { discoverProviderModels, type DiscoveredModel } from './model-discovery.js';
 import { appliedCatalogPlatforms, DISCOVERED_MODEL_SOURCE } from './catalog-sync.js';
 import { clearCatalogModelTombstone, isCatalogModelTombstoned } from './model-state.js';
@@ -124,6 +124,8 @@ interface KeyRow {
   proxy_encrypted?: string | null;
   proxy_iv?: string | null;
   proxy_auth_tag?: string | null;
+  relay_mode?: string | null;
+  relay_pool_id?: number | null;
 }
 
 /** Fetch the platform's /models with one of its keys, through that key's own
@@ -134,7 +136,7 @@ export async function discoverBuiltinModels(
   apiKeyOverride?: string,
 ): Promise<DiscoveredModel[]> {
   const apiKey = apiKeyOverride?.trim() || decrypt(key.encrypted_key, key.iv, key.auth_tag);
-  return withKeyProxy(decryptProxyUrl(key), () => discoverProviderModels(provider, apiKey, provider.modelsUrl.replace(/\/models\/?$/, '')));
+  return withRequestEgress({ proxyUrl: decryptProxyUrl(key), relayMode: key.relay_mode === 'pool' || key.relay_mode === 'direct' ? key.relay_mode : 'inherit', relayPoolId: key.relay_pool_id ?? null, stickyScope: key.id }, () => discoverProviderModels(provider, apiKey, provider.modelsUrl.replace(/\/models\/?$/, '')));
 }
 
 /** Discovered model ids already present on this platform, in any provenance. */

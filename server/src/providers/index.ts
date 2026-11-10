@@ -54,6 +54,7 @@ import { OnomeoProvider } from './onomeo.js';
 import { IteraComputeProvider } from './iteracompute.js';
 import { SerpSearchProvider } from './serpsearch.js';
 import { BraveProvider } from './brave.js';
+import { AntigravityProvider } from './antigravity.js';
 
 const providers = new Map<Platform, BaseProvider>();
 
@@ -124,6 +125,11 @@ register(new ExperientialProvider());
 // the existing Premium-now / Free-after-30-days gate remains authoritative.
 register(new Router9Provider());
 register(new SeptorProvider());
+// Antigravity — Google Cloud Code Assist (Antigravity IDE backend). OAuth
+// device-flow credentials only; the api_keys row's encrypted_key plaintext
+// is the credential blob handled by lib/oauth.ts. Long-prefill frontier
+// models get the same 60s headroom as other slow chat providers.
+register(new AntigravityProvider({ timeoutMs: 60_000 }));
 register(new ClodProvider());
 register(new SpeechifyProvider());
 register(new VarosityProvider());

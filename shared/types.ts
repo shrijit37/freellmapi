@@ -286,6 +286,10 @@ export type Platform =
   // aihorde.net key raises queue priority. Has a dedicated AIHordeProvider that
   // normalizes the proxy's OpenAI divergences. See issue #345.
   | 'aihorde'
+  // Antigravity (Google Cloud Code Assist) — OAuth2 credential, not a static
+  // API key. Requests go to the cloudcode-pa v1internal Gemini-shaped API;
+  // see server/src/providers/antigravity.ts.
+  | 'antigravity'
   // User-configured OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM,
   // Ollama, any base_url). The endpoint URL lives on the api_keys row; see #117.
   | 'custom';

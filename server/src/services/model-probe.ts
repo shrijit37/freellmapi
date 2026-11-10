@@ -33,7 +33,7 @@ import { getDb } from '../db/index.js';
 import { resolveProvider } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { decryptProxyUrl } from '../lib/key-proxy.js';
-import { withKeyProxy } from '../lib/proxy.js';
+import { withRequestEgress } from '../lib/proxy.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
 import { providerLog } from '../lib/server-logs.js';
 import { inferQuotaPoolKey } from './provider-quota.js';
@@ -155,7 +155,7 @@ async function probeChat(candidate: ProbeCandidate): Promise<void> {
   // Same reasoning as checkKeyHealth (#590): probe through the key's own proxy,
   // or a key only reachable via its proxy would fail the probe while real
   // traffic through the proxy works fine.
-  await withKeyProxy(decryptProxyUrl(row), () => provider.chatCompletion(apiKey, [
+  await withRequestEgress({ proxyUrl: decryptProxyUrl(row), relayMode: row.relay_mode, relayPoolId: row.relay_pool_id, stickyScope: candidate.keyId }, () => provider.chatCompletion(apiKey, [
     { role: 'user', content: 'Reply with OK' },
   ], candidate.modelId, {
     max_tokens: PROBE_MAX_TOKENS,
